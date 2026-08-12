@@ -1,0 +1,37 @@
+# Declarative Automation Bundle configuration, more info here: https://docs.databricks.com/en/dev-tools/bundles/settings.html
+bundle:
+  name: "ev_etl"
+
+include:
+  - resources/*.yml
+  - resources/*/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog name
+    default: dev
+  source_volume_path:
+    description: Path to source data volume
+    default: /Volumes/dev/bronze/eved/eVED
+
+targets:
+  # The 'dev' target, for development purposes. This target is the default.
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-81bb4f9a-79d1.cloud.databricks.com
+    variables:
+      catalog: dev
+
+  # The 'prod' target, used for production deployment.
+  prod:
+    mode: production
+    workspace:
+      host: https://dbc-81bb4f9a-79d1.cloud.databricks.com
+      # We always use /Users/joel@ramirezai.com for all resources to make sure we only have a single copy.
+      root_path: /Users/joel@ramirezai.com/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      # This runs as joel@ramirezai.com in production. We could also use a service principal here,
+      # see https://docs.databricks.com/dev-tools/bundles/permissions.html.
+      user_name: joel@ramirezai.com

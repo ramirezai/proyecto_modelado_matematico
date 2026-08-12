@@ -1,0 +1,36 @@
+resources:
+  pipelines:
+    ev_etl:
+      name: 'EV Trip ETL Pipeline - ${var.catalog}'
+      
+      # Unity Catalog configuration
+      catalog: ${var.catalog}
+      target: bronze  # Schema where pipeline metadata is stored
+      
+      # Pipeline source code
+      libraries:
+        - glob:
+            include: ../src/pipelines/ev_etl/transformations/**
+      
+      root_path: ../src/pipelines/ev_etl
+      
+      # Compute configuration
+      serverless: true
+      
+      # Pipeline configuration variables
+      configuration:
+        source_volume_path: ${var.source_volume_path}
+        catalog: ${var.catalog}
+      
+      # Execution mode
+      continuous: false  # Triggered execution
+      development: true  # Enable development mode for faster iteration
+      photon: true       # Enable Photon for better performance
+      
+      # Channel for updates
+      channel: current
+      
+      # Permissions
+      permissions:
+        - level: CAN_VIEW
+          group_name: 'users'
