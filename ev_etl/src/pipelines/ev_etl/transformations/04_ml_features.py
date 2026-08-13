@@ -9,10 +9,24 @@ catalog = spark.conf.get("catalog")
 
 @dlt.materialized_view(
     name=f"{catalog}.ml_features.ml_features_energy_prediction",
-    comment="ML features for predicting EV energy consumption. Includes trip characteristics and historical patterns.",
+    comment="""ML features for predicting EV energy consumption. 
+    
+    Architecture Note:
+    - Source: silver.silver_ev_trips (all valid trips, ~32K records)
+    - Output: Only trips with sufficient history for ML training (~23K records)
+    - Filtered: Vehicles must have 30+ previous trips for reliable features
+    - Nulls: Eliminated by requiring complete historical features
+    
+    Primary Keys: (VehId, Trip) - Unique identifier for each trip per vehicle
+    Feature Store: This table is designed as a Unity Catalog Feature Table
+    
+    This table is ML-specific. For general trip analysis, use silver.silver_ev_trips.
+    """,
     table_properties={
         "quality": "ml_features",
-        "pipelines.autoOptimize.zOrderCols": "VehId,trip_date"
+        "pipelines.autoOptimize.zOrderCols": "VehId,trip_date",
+        "delta.constraints.pk_vehid_notnull": "VehId IS NOT NULL",
+        "delta.constraints.pk_trip_notnull": "Trip IS NOT NULL"
     }
 )
 def ml_features_energy_prediction():
@@ -286,8 +300,15 @@ def ml_features_energy_prediction():
             current_timestamp().alias("feature_timestamp")
         )
         # Filter out records without sufficient history for training
+        # Ensure all critical historical features are populated to avoid nulls in ML training
         .filter(
-            (col("vehicle_trip_count_last30").isNotNull()) &
+            # Vehicle must have at least 30 previous trips for reliable history
+            (col("vehicle_trip_count_last30") >= 30) &
+            # All vehicle historical features must be present (stddev needs 2+ values)
+            (col("vehicle_avg_efficiency_last30").isNotNull()) &
+            (col("vehicle_avg_energy_last30").isNotNull()) &
+            (col("vehicle_stddev_energy_last30").isNotNull()) &
+            # Route must have at least 1 previous trip
             (col("route_trip_count") >= 1)
         )
     )
