@@ -28,7 +28,7 @@ targets:
   prod:
     mode: production
     workspace:
-      host: https://dbc-17ac0c1e-fcc6.cloud.databricks.com/
+      host: https://dbc-81bb4f9a-79d1.cloud.databricks.com/
       # We always use /Users/joel@ramirezai.com for all resources to make sure we only have a single copy.
       root_path: /Users/joel@ramirezai.com/.bundle/${bundle.name}/${bundle.target}
     run_as:
