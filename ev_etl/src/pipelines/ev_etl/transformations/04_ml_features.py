@@ -1,7 +1,8 @@
 import dlt
 from pyspark.sql.functions import (
     col, avg, count, stddev, sum as spark_sum,
-    round as spark_round, current_timestamp, pow, lit, when
+    round as spark_round, current_timestamp, pow, lit, when,
+    sin, cos
 )
 from pyspark.sql.window import Window
 
@@ -14,7 +15,7 @@ catalog = spark.conf.get("catalog")
     Architecture Note:
     - Source: silver.silver_ev_trips (all valid trips, ~32K records)
     - Output: Only trips with sufficient history for ML training (~23K records)
-    - Filtered: Vehicles must have 30+ previous trips for reliable features
+    - Filtered: Vehicles must have 5+ previous trips for reliable features
     - Nulls: Eliminated by requiring complete historical features
     
     Primary Keys: (VehId, Trip) - Unique identifier for each trip per vehicle
@@ -223,6 +224,59 @@ def ml_features_energy_prediction():
             )
         )
         
+        # ========================================
+        # TEMPORAL PATTERN FEATURES (from training notebook)
+        # ========================================
+        .withColumn(
+            "is_rush_hour",
+            when(
+                ((col("trip_hour") >= 7) & (col("trip_hour") <= 9)) |
+                ((col("trip_hour") >= 17) & (col("trip_hour") <= 19)),
+                lit(1)
+            ).otherwise(lit(0))
+        )
+        .withColumn(
+            "is_weekend",
+            # Spark dayofweek: 1=Sunday, 7=Saturday
+            when((col("trip_dayofweek") == 1) | (col("trip_dayofweek") == 7), lit(1))
+            .otherwise(lit(0))
+        )
+        .withColumn(
+            "hour_sin",
+            spark_round(sin(col("trip_hour") * lit(2 * 3.141592653589793 / 24)), 4)
+        )
+        .withColumn(
+            "hour_cos",
+            spark_round(cos(col("trip_hour") * lit(2 * 3.141592653589793 / 24)), 4)
+        )
+        
+        # Distance and speed categorization
+        .withColumn(
+            "distance_category",
+            when(col("distance_km") <= 5, lit(0.0))
+            .when(col("distance_km") <= 15, lit(1.0))
+            .when(col("distance_km") <= 30, lit(2.0))
+            .otherwise(lit(3.0))
+        )
+        .withColumn(
+            "speed_category",
+            # 0=urban, 1=suburban, 2=highway
+            when(col("avg_speed_kmh") <= 30, lit(0.0))
+            .when(col("avg_speed_kmh") <= 60, lit(1.0))
+            .otherwise(lit(2.0))
+        )
+        
+        # Vehicle efficiency vs fleet average
+        .withColumn(
+            "fleet_avg_efficiency",
+            avg("vehicle_avg_efficiency_last30").over(Window.partitionBy(lit(1)))
+        )
+        .withColumn(
+            "vehicle_efficiency_vs_fleet",
+            spark_round(col("vehicle_avg_efficiency_last30") - col("fleet_avg_efficiency"), 4)
+        )
+        .drop("fleet_avg_efficiency")
+        
         # Select features in logical order
         .select(
             # Identifiers
@@ -296,14 +350,27 @@ def ml_features_energy_prediction():
             col("elevation_per_minute"),
             col("trip_complexity_score"),
             
+            # Temporal pattern features
+            col("is_rush_hour"),
+            col("is_weekend"),
+            col("hour_sin"),
+            col("hour_cos"),
+            
+            # Categorization features
+            col("distance_category"),
+            col("speed_category"),
+            
+            # Fleet comparison features
+            col("vehicle_efficiency_vs_fleet"),
+            
             # Metadata
             current_timestamp().alias("feature_timestamp")
         )
         # Filter out records without sufficient history for training
         # Ensure all critical historical features are populated to avoid nulls in ML training
         .filter(
-            # Vehicle must have at least 30 previous trips for reliable history
-            (col("vehicle_trip_count_last30") >= 30) &
+            # Vehicle must have at least 5 previous trips for reliable history
+            (col("vehicle_trip_count_last30") >= 5) &
             # All vehicle historical features must be present (stddev needs 2+ values)
             (col("vehicle_avg_efficiency_last30").isNotNull()) &
             (col("vehicle_avg_energy_last30").isNotNull()) &

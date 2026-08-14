@@ -1,9 +1,9 @@
 import dlt
 from pyspark.sql.functions import (
     col, min as spark_min, max as spark_max, avg, sum as spark_sum,
-    count, first, last, round as spark_round, radians, sin, cos, sqrt, atan2,
-    from_unixtime, to_timestamp, year, month, dayofweek, hour, current_timestamp,
-    when, lower, lit
+    count, min_by, max_by, round as spark_round, radians, sin, cos, sqrt, atan2,
+    year, month, dayofweek, hour, current_timestamp,
+    when, lower, lit, floor, date_add, concat, lpad
 )
 
 catalog = spark.conf.get("catalog")
@@ -119,11 +119,11 @@ def silver_ev_trips():
             spark_min("`Timestamp(ms)`").alias("start_timestamp_ms"),
             spark_max("`Timestamp(ms)`").alias("end_timestamp_ms"),
             
-            # GPS coordinates for distance calculation
-            first("`Latitude[deg]`").alias("origin_lat"),
-            first("`Longitude[deg]`").alias("origin_lon"),
-            last("`Latitude[deg]`").alias("destination_lat"),
-            last("`Longitude[deg]`").alias("destination_lon"),
+            # GPS coordinates for distance calculation (ordered by timestamp)
+            min_by(col("`Latitude[deg]`").cast("double"), col("`Timestamp(ms)`").cast("double")).alias("origin_lat"),
+            min_by(col("`Longitude[deg]`").cast("double"), col("`Timestamp(ms)`").cast("double")).alias("origin_lon"),
+            max_by(col("`Latitude[deg]`").cast("double"), col("`Timestamp(ms)`").cast("double")).alias("destination_lat"),
+            max_by(col("`Longitude[deg]`").cast("double"), col("`Timestamp(ms)`").cast("double")).alias("destination_lon"),
             
             # Energy metrics - handle potential string columns
             spark_sum(col("`Energy_Consumption`").cast("double")).alias("total_energy_consumption"),
@@ -151,17 +151,36 @@ def silver_ev_trips():
     # Calculate derived metrics
     result = (
         trips
-        # Convert timestamp to datetime
-        .withColumn("trip_start_datetime", 
-                   from_unixtime(col("start_timestamp_ms") / 1000))
-        .withColumn("trip_end_datetime", 
-                   from_unixtime(col("end_timestamp_ms") / 1000))
-        
-        # Calculate duration in seconds and minutes
+        # Calculate duration in seconds and minutes (from relative Timestamp(ms))
         .withColumn("duration_seconds", 
                    (col("end_timestamp_ms") - col("start_timestamp_ms")) / 1000)
         .withColumn("duration_minutes", 
                    spark_round(col("duration_seconds") / 60, 2))
+        
+        # Temporal features from DayNum
+        # DayNum encoding: integer part = day number (1-based from 2017-11-01)
+        #                  decimal part = fraction of day (time-of-day)
+        .withColumn("daynum_double", col("DayNum").cast("double"))
+        .withColumn("trip_date", 
+                   date_add(lit("2017-10-31").cast("date"), floor(col("daynum_double")).cast("int")))
+        .withColumn("day_fraction", col("daynum_double") - floor(col("daynum_double")))
+        .withColumn("trip_hour", floor(col("day_fraction") * 24).cast("int"))
+        .withColumn("trip_minute", floor((col("day_fraction") * 24 - col("trip_hour")) * 60).cast("int"))
+        .withColumn("trip_start_datetime",
+                   concat(
+                       col("trip_date").cast("string"), lit(" "),
+                       lpad(col("trip_hour").cast("string"), 2, "0"), lit(":"),
+                       lpad(col("trip_minute").cast("string"), 2, "0"), lit(":00")
+                   ))
+        .withColumn("trip_end_datetime",
+                   concat(
+                       col("trip_date").cast("string"), lit(" "),
+                       lpad(col("trip_hour").cast("string"), 2, "0"), lit(":"),
+                       lpad(col("trip_minute").cast("string"), 2, "0"), lit(":00")
+                   ))
+        .withColumn("trip_year", year(col("trip_date")))
+        .withColumn("trip_month", month(col("trip_date")))
+        .withColumn("trip_dayofweek", dayofweek(col("trip_date")))
         
         # Calculate distance using Haversine formula
         .withColumn("lat1_rad", radians(col("origin_lat")))
@@ -183,13 +202,6 @@ def silver_ev_trips():
         .withColumn("efficiency_km_per_energy",
                    spark_round(col("distance_km") / col("total_energy_consumption"), 4))
         
-        # Temporal features
-        .withColumn("trip_date", to_timestamp(col("trip_start_datetime")).cast("date"))
-        .withColumn("trip_year", year(col("trip_start_datetime")))
-        .withColumn("trip_month", month(col("trip_start_datetime")))
-        .withColumn("trip_dayofweek", dayofweek(col("trip_start_datetime")))
-        .withColumn("trip_hour", hour(col("trip_start_datetime")))
-        
         # Round numeric columns
         .withColumn("total_energy_consumption", spark_round(col("total_energy_consumption"), 2))
         .withColumn("avg_battery_soc", spark_round(col("avg_battery_soc"), 2))
@@ -202,7 +214,8 @@ def silver_ev_trips():
         .withColumn("processing_timestamp", current_timestamp())
         
         # Drop intermediate calculation columns
-        .drop("lat1_rad", "lat2_rad", "dlat", "dlon", "a", "c")
+        .drop("lat1_rad", "lat2_rad", "dlat", "dlon", "a", "c",
+              "daynum_double", "day_fraction", "trip_minute")
         
         # Select final columns in logical order
         .select(
