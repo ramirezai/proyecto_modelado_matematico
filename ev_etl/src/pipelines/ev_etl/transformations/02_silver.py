@@ -2,10 +2,80 @@ import dlt
 from pyspark.sql.functions import (
     col, min as spark_min, max as spark_max, avg, sum as spark_sum,
     count, first, last, round as spark_round, radians, sin, cos, sqrt, atan2,
-    from_unixtime, to_timestamp, year, month, dayofweek, hour, current_timestamp
+    from_unixtime, to_timestamp, year, month, dayofweek, hour, current_timestamp,
+    when, lower, lit
 )
 
 catalog = spark.conf.get("catalog")
+
+@dlt.temporary_view(
+    comment="Identifies Battery Electric Vehicles (BEVs) by analyzing signal presence"
+)
+def ev_vehicle_identification():
+    """Identify which vehicles are Battery Electric Vehicles (BEVs).
+    
+    Logic:
+    - Check for combustion engine signals (Fuel Rate, MAF, Engine RPM)
+    - Check for battery signals (HV Battery SOC, Current, Voltage)
+    - EVs have battery signals but no combustion signals
+    
+    Returns: VehId and vehicle_type for BEVs only
+    """
+    df = spark.read.table(f"{catalog}.bronze.bronze_ev_telemetry")
+    
+    # Identify signal presence for each vehicle
+    vehicle_signals = (
+        df
+        .groupBy("VehId")
+        .agg(
+            # Check for combustion engine signals
+            spark_max(
+                when(
+                    (col("`Fuel Rate[L/hr]`").isNotNull()) & 
+                    (lower(col("`Fuel Rate[L/hr]`").cast("string")) != "nan"),
+                    lit(1)
+                ).when(
+                    (col("`MAF[g/sec]`").isNotNull()) & 
+                    (lower(col("`MAF[g/sec]`").cast("string")) != "nan"),
+                    lit(1)
+                ).when(
+                    (col("`Engine RPM[RPM]`").isNotNull()) & 
+                    (lower(col("`Engine RPM[RPM]`").cast("string")) != "nan"),
+                    lit(1)
+                ).otherwise(lit(0))
+            ).alias("has_combustion"),
+            
+            # Check for battery signals
+            spark_max(
+                when(
+                    (col("`HV Battery SOC[%]`").isNotNull()) & 
+                    (lower(col("`HV Battery SOC[%]`").cast("string")) != "nan"),
+                    lit(1)
+                ).when(
+                    (col("`HV Battery Current[A]`").isNotNull()) & 
+                    (lower(col("`HV Battery Current[A]`").cast("string")) != "nan"),
+                    lit(1)
+                ).when(
+                    (col("`HV Battery Voltage[V]`").isNotNull()) & 
+                    (lower(col("`HV Battery Voltage[V]`").cast("string")) != "nan"),
+                    lit(1)
+                ).otherwise(lit(0))
+            ).alias("has_battery")
+        )
+    )
+    
+    # Filter to EVs only (has battery, no combustion)
+    ev_vehicles = (
+        vehicle_signals
+        .filter((col("has_battery") == 1) & (col("has_combustion") == 0))
+        .select(
+            "VehId",
+            lit("Battery Electric (BEV)").alias("vehicle_type")
+        )
+        .orderBy("VehId")
+    )
+    
+    return ev_vehicles
 
 @dlt.materialized_view(
     name=f"{catalog}.silver.silver_ev_trips",
@@ -34,9 +104,15 @@ def silver_ev_trips():
     # Read bronze telemetry data (batch read for aggregation)
     df = spark.read.table(f"{catalog}.bronze.bronze_ev_telemetry")
     
+    # Get EV vehicle list
+    ev_vehicles = spark.read.table("ev_vehicle_identification")
+    
+    # Filter to only EV vehicles
+    df_ev = df.join(ev_vehicles, on="VehId", how="inner")
+    
     # Aggregate by trip (DayNum, VehId, Trip)
     trips = (
-        df
+        df_ev
         .groupBy("DayNum", "VehId", "Trip")
         .agg(
             # Temporal features

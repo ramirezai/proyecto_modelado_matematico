@@ -23,7 +23,7 @@ def gold_vehicle_daily_stats():
     - Efficiency and performance metrics
     """
     return (
-        spark.read.table("silver_ev_trips")
+        spark.read.table(f"{catalog}.silver.silver_ev_trips")
             .groupBy("VehId", "trip_date")
             .agg(
                 count("Trip").alias("total_trips"),
@@ -49,7 +49,7 @@ def gold_vehicle_daily_stats():
 
 
 @dlt.materialized_view(
-    name="gold_route_patterns",
+    name=f"{catalog}.gold.gold_route_patterns",
     comment="Route-level analysis with energy consumption patterns. Groups trips by approximate origin-destination pairs.",
     table_properties={
         "quality": "gold"
@@ -65,7 +65,7 @@ def gold_route_patterns():
     - Energy consumption prediction
     """
     return (
-        spark.read.table("silver_ev_trips")
+        spark.read.table(f"{catalog}.silver.silver_ev_trips")
             # Round coordinates to ~1km precision for route grouping
             .withColumn("origin_lat_rounded", spark_round(col("origin_lat"), 2))
             .withColumn("origin_lon_rounded", spark_round(col("origin_lon"), 2))
@@ -96,7 +96,7 @@ def gold_route_patterns():
 
 
 @dlt.materialized_view(
-    name="gold_temporal_patterns",
+    name=f"{catalog}.gold.gold_temporal_patterns",
     comment="Temporal energy consumption patterns by hour and day of week",
     table_properties={
         "quality": "gold"
@@ -111,7 +111,7 @@ def gold_temporal_patterns():
     - Seasonal trends
     """
     return (
-        spark.read.table("silver_ev_trips")
+        spark.read.table(f"{catalog}.silver.silver_ev_trips")
             .groupBy("trip_dayofweek", "trip_hour")
             .agg(
                 count("Trip").alias("trip_count"),
